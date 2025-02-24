@@ -196,21 +196,6 @@ The extension automatically caches dumped models and tracks their metadata. When
 
 This means you only pay the loading cost when necessary, while ensuring users always have the latest version of your models.
 
-### Scene Setup
-
-Example scene tree:
-```
-Root
-├── ChatModel (NobodyWhoModel)
-│   ├── model_path = "res://models/chat.gguf"
-│   └── use_gpu_if_available = true
-├── EmbeddingsModel (NobodyWhoModel)
-│   ├── model_path = "res://models/embeddings.gguf"
-│   └── use_gpu_if_available = true
-├── Chat (NobodyWhoChat)
-└── Embeddings (NobodyWhoEmbedding)
-```
-
 ## Loading States
 
 You can track the loading state of models through the following signals:
