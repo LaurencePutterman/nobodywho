@@ -12,8 +12,47 @@ IOS_SDK_VERSION=$(xcrun --sdk iphoneos --show-sdk-version)
 IOS_SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
 MIN_IOS_VERSION="14.0"
 
+# llama.cpp configuration
+# To update the commit hash:
+# 1. Visit https://github.com/ggerganov/llama.cpp/commits/master
+# 2. Choose a stable commit (preferably one that's been tested)
+# 3. Use either:
+#    - Full hash (e.g., 7a2c913e66353362d7f28d612fd3c9d51a831eda)
+#    - Short hash (e.g., 7a2c913)
+LLAMA_CPP_REPO="https://github.com/ggerganov/llama.cpp.git"
+LLAMA_CPP_REV="7a2c913e66353362d7f28d612fd3c9d51a831eda"  # Full hash for precise version control
+
 # Default bundle identifier (can be overridden)
 BUNDLE_ID="${BUNDLE_ID:-org.godot.nobodywho}"
+
+# Function to check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Function to setup llama.cpp
+setup_llama_cpp() {
+    # Check if git is available
+    if ! command_exists git; then
+        echo "Error: git is required to setup llama.cpp"
+        exit 1
+    fi
+
+    if [ ! -d "llama.cpp" ]; then
+        echo "Cloning llama.cpp..."
+        git clone $LLAMA_CPP_REPO llama.cpp
+        (cd llama.cpp && git checkout $LLAMA_CPP_REV)
+    else
+        echo "llama.cpp directory already exists, checking version..."
+        (cd llama.cpp && \
+         current_rev=$(git rev-parse --short HEAD) && \
+         if [ "$current_rev" != "$LLAMA_CPP_REV" ]; then
+             echo "Updating llama.cpp to required version..." && \
+             git fetch && \
+             git checkout $LLAMA_CPP_REV
+         fi)
+    fi
+}
 
 # Help message
 show_help() {
@@ -51,6 +90,10 @@ echo "Cleaning previous builds..."
 rm -rf target/universal-ios
 rm -rf target/aarch64-apple-ios/debug/build
 rm -rf target/aarch64-apple-ios/release/build
+
+# Setup llama.cpp dependency
+echo "Setting up llama.cpp dependency..."
+setup_llama_cpp
 
 # Create directories
 mkdir -p target/universal-ios/frameworks
