@@ -542,7 +542,7 @@ checksum = "e943b2c21337b7e3ec6678500687cdc741b7639ad457f234693352075c082204"
 
 [[package]]
 name = "nobodywho"
-version = "4.5.0"
+version = "4.6.0"
 dependencies = [
  "chrono",
  "cmake",
@@ -555,6 +555,7 @@ dependencies = [
  "minijinja-contrib",
  "rusqlite",
  "serde",
+ "serde_json",
  "sqlite-vec",
  "thiserror 2.0.10",
 ]

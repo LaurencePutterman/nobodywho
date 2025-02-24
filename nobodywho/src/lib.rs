@@ -1,11 +1,13 @@
 mod chat_state;
 mod db;
 mod llm;
+mod metadata;
 mod sampler_config;
 mod sampler_resource;
 
 use godot::classes::{INode, ProjectSettings};
 use godot::prelude::*;
+use godot::obj::Base;
 use llm::{run_completion_worker, run_embedding_worker};
 use sampler_resource::NobodyWhoSampler;
 use std::sync::mpsc::{Receiver, Sender};
@@ -21,6 +23,9 @@ unsafe impl ExtensionLibrary for NobodyWhoExtension {}
 ///
 /// If you dont know what model to use, we would suggest checking out https://huggingface.co/spaces/k-mktr/gpu-poor-llm-arena
 struct NobodyWhoModel {
+    #[base]
+    base: Base<Node>,
+
     #[export(file = "*.gguf")]
     model_path: GString,
 
@@ -32,11 +37,12 @@ struct NobodyWhoModel {
 
 #[godot_api]
 impl INode for NobodyWhoModel {
-    fn init(_base: Base<Node>) -> Self {
+    fn init(base: Base<Node>) -> Self {
         // default values to show in godot editor
         let model_path: String = "model.gguf".into();
 
         Self {
+            base,
             model_path: model_path.into(),
             use_gpu_if_available: true,
             model: None,
@@ -44,6 +50,7 @@ impl INode for NobodyWhoModel {
     }
 }
 
+#[godot_api]
 impl NobodyWhoModel {
     // memoized model loader
     fn get_model(&mut self) -> Result<llm::Model, llm::LoadModelError> {
@@ -66,6 +73,95 @@ impl NobodyWhoModel {
                 Err(err)
             }
         }
+    }
+
+    #[signal]
+    fn progress_changed(progress: f32) {}
+
+    #[signal]
+    fn loading_completed() {}
+
+    #[func]
+    /// Asynchronously loads a model from the source path to the destination path.
+    /// Emits progress_changed signal with progress (0-100) and loading_completed when done.
+    fn load_model_asynchronously(&mut self, source_path: GString, dest_path: GString) {
+        // Convert paths to absolute paths using ProjectSettings
+        let project_settings = ProjectSettings::singleton();
+        let source_path = project_settings.globalize_path(&source_path);
+        let dest_path = project_settings.globalize_path(&dest_path);
+        
+        // Convert GString to String for Path operations
+        let source_path_str: String = source_path.to_string();
+        let dest_path_str: String = dest_path.to_string();
+        
+        // Verify source file exists before starting
+        if !std::path::Path::new(&source_path_str).exists() {
+            godot_error!("Source file does not exist: {}", source_path_str);
+            return;
+        }
+
+        // Create a unique key for this model based on its destination path
+        let model_key = if let Some(filename) = std::path::Path::new(&dest_path_str).file_name() {
+            filename.to_string_lossy().to_string()
+        } else {
+            "unknown_model".to_string()
+        };
+
+        // Check if we need to dump the model based on metadata
+        let metadata_path = project_settings.globalize_path("user://model_metadata.json").to_string();
+        if !metadata::should_dump_model(&source_path_str, &dest_path_str, &metadata_path, &model_key) {
+            // Model is up to date, emit completion immediately
+            self.base_mut().emit_signal("loading_completed", &[]);
+            return;
+        }
+        
+        let mut loader = llm::ModelLoader::new(source_path.to_string(), dest_path.to_string());
+        let instance_id = self.base_mut().instance_id();
+        
+        // Start a thread to monitor the loader's progress
+        std::thread::spawn(move || {
+            // Start the actual loading process
+            loader.start_loading();
+            
+            let mut last_progress = -1.0;
+            let mut stall_count = 0;
+            
+            // Monitor progress
+            while !loader.is_completed() {
+                let progress = loader.get_progress() * 100.0; // Convert back to percentage
+                
+                // Only emit if progress has changed
+                if progress != last_progress {
+                    unsafe {
+                        let mut obj = Gd::<NobodyWhoModel>::from_instance_id(instance_id);
+                        obj.emit_signal("progress_changed", &[Variant::from(progress)]);
+                    }
+                    last_progress = progress;
+                    stall_count = 0;
+                } else {
+                    stall_count += 1;
+                    // If progress hasn't changed for 50 checks (5 seconds), assume something went wrong
+                    if stall_count > 50 {
+                        unsafe {
+                            let mut obj = Gd::<NobodyWhoModel>::from_instance_id(instance_id);
+                            obj.emit_signal("loading_completed", &[]);
+                        }
+                        return;
+                    }
+                }
+                
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            
+            // Wait for the loader thread to complete
+            loader.wait_for_completion();
+            
+            // Emit completion signal
+            unsafe {
+                let mut obj = Gd::<NobodyWhoModel>::from_instance_id(instance_id);
+                obj.emit_signal("loading_completed", &[]);
+            }
+        });
     }
 }
 

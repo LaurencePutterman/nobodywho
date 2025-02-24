@@ -13,6 +13,9 @@ use std::collections::VecDeque;
 use std::pin::pin;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::fs::File;
+use std::io::{Read, Write, BufReader, BufWriter};
+use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
 
 const MAX_TOKEN_STR_LEN: usize = 128;
 
@@ -474,6 +477,100 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return f32::NAN;
     }
     dotproduct(a, b) / (norm_a * norm_b)
+}
+
+pub struct ModelLoader {
+    source_path: String,
+    dest_path: String,
+    dump_progress: Arc<AtomicU32>,
+    dump_completed: Arc<AtomicBool>,
+    dump_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ModelLoader {
+    pub fn new(source_path: String, dest_path: String) -> Self {
+        Self {
+            source_path,
+            dest_path,
+            dump_progress: Arc::new(AtomicU32::new(0)),
+            dump_completed: Arc::new(AtomicBool::new(false)),
+            dump_thread: None,
+        }
+    }
+
+    pub fn start_loading(&mut self) {
+        let source_path = self.source_path.clone();
+        let dest_path = self.dest_path.clone();
+        let progress = self.dump_progress.clone();
+        let completed = self.dump_completed.clone();
+        
+        self.dump_thread = Some(std::thread::spawn(move || {
+            if !std::path::Path::new(&source_path).exists() {
+                return;
+            }
+
+            let file_source = match File::open(&source_path) {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+
+            let file_dest = match File::create(&dest_path) {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+
+            let metadata = match file_source.metadata() {
+                Ok(m) => m,
+                Err(_) => return,
+            };
+            
+            let length = metadata.len();
+            let mut total_bytes_written = 0;
+            let chunk_size = 8192;
+            let mut reader = BufReader::new(file_source);
+            let mut writer = BufWriter::new(file_dest);
+            let mut buffer = vec![0; chunk_size as usize];
+
+            while total_bytes_written < length {
+                let bytes_read = match reader.read(&mut buffer) {
+                    Ok(0) => break, // EOF
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+
+                if let Err(_) = writer.write_all(&buffer[..bytes_read]) {
+                    break;
+                }
+
+                total_bytes_written += bytes_read as u64;
+                // Store progress as integer percentage (0-100)
+                let progress_pct = ((total_bytes_written as f64 / length as f64) * 100.0) as u32;
+                progress.store(progress_pct, Ordering::Relaxed);
+            }
+
+            if let Err(_) = writer.flush() {
+                return;
+            }
+
+            if total_bytes_written >= length {
+                completed.store(true, Ordering::Relaxed);
+            }
+        }));
+    }
+
+    pub fn is_completed(&self) -> bool {
+        self.dump_completed.load(Ordering::Relaxed)
+    }
+
+    pub fn get_progress(&self) -> f32 {
+        self.dump_progress.load(Ordering::Relaxed) as f32 / 100.0
+    }
+
+    pub fn wait_for_completion(&mut self) {
+        if let Some(thread) = self.dump_thread.take() {
+            thread.join().unwrap();
+        }
+    }
 }
 
 #[cfg(test)]
