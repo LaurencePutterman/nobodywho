@@ -16,6 +16,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::fs::File;
 use std::io::{Read, Write, BufReader, BufWriter};
 use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
+use godot::classes::FileAccess;
+use godot::classes::file_access::ModeFlags;
+use godot::prelude::*;
 
 const MAX_TOKEN_STR_LEN: usize = 128;
 
@@ -505,56 +508,66 @@ impl ModelLoader {
         let completed = self.dump_completed.clone();
         
         self.dump_thread = Some(std::thread::spawn(move || {
-            if !std::path::Path::new(&source_path).exists() {
+            // Check if source file exists
+            if !FileAccess::file_exists(&source_path) {
+                godot_error!("Source file does not exist: {}", source_path);
                 return;
             }
 
-            let file_source = match File::open(&source_path) {
-                Ok(f) => f,
-                Err(_) => return,
+            // Open source file using Godot's FileAccess
+            let file_source = FileAccess::open(&source_path, ModeFlags::READ);
+            let mut file_source = match file_source {
+                Some(f) => f,
+                None => {
+                    godot_error!("Failed to open source file for reading: {}", source_path);
+                    return;
+                }
             };
 
-            let file_dest = match File::create(&dest_path) {
-                Ok(f) => f,
-                Err(_) => return,
+            // Open destination file using Godot's FileAccess
+            let file_dest = FileAccess::open(&dest_path, ModeFlags::WRITE);
+            let mut file_dest = match file_dest {
+                Some(f) => f,
+                None => {
+                    godot_error!("Failed to open destination file for writing: {}", dest_path);
+                    return;
+                }
             };
 
-            let metadata = match file_source.metadata() {
-                Ok(m) => m,
-                Err(_) => return,
-            };
-            
-            let length = metadata.len();
+            // Get file length using Godot's API
+            let length = file_source.get_length() as u64;
             let mut total_bytes_written = 0;
-            let chunk_size = 8192;
-            let mut reader = BufReader::new(file_source);
-            let mut writer = BufWriter::new(file_dest);
-            let mut buffer = vec![0; chunk_size as usize];
-
+            let chunk_size: i64 = 8192;
+            
+            godot_print!("Starting to dump file of size: {} bytes", length);
+            
             while total_bytes_written < length {
-                let bytes_read = match reader.read(&mut buffer) {
-                    Ok(0) => break, // EOF
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
-
-                if let Err(_) = writer.write_all(&buffer[..bytes_read]) {
+                let bytes_left = length - total_bytes_written;
+                let to_read = std::cmp::min(bytes_left as i64, chunk_size);
+                
+                // Read chunk using Godot's API
+                let buffer = file_source.get_buffer(to_read);
+                if buffer.is_empty() {
+                    godot_error!("Failed to read chunk at position: {}", total_bytes_written);
                     break;
                 }
 
-                total_bytes_written += bytes_read as u64;
+                // Write chunk using Godot's API
+                file_dest.store_buffer(&buffer);
+                total_bytes_written += buffer.len() as u64;
+                
                 // Store progress as integer percentage (0-100)
                 let progress_pct = ((total_bytes_written as f64 / length as f64) * 100.0) as u32;
                 progress.store(progress_pct, Ordering::Relaxed);
             }
 
-            if let Err(_) = writer.flush() {
+            if total_bytes_written < length {
+                godot_error!("Warning: Only dumped {} of {} bytes", total_bytes_written, length);
                 return;
             }
-
-            if total_bytes_written >= length {
-                completed.store(true, Ordering::Relaxed);
-            }
+            
+            godot_print!("Successfully dumped all {} bytes", length);
+            completed.store(true, Ordering::Relaxed);
         }));
     }
 

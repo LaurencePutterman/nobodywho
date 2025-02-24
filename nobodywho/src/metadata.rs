@@ -1,8 +1,7 @@
-use godot::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::Path;
-use std::time::SystemTime;
+use godot::classes::FileAccess;
+use godot::classes::file_access::ModeFlags;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileMetadata {
@@ -18,38 +17,44 @@ pub struct StoredMetadata {
 
 impl FileMetadata {
     pub fn from_path(path: &str) -> Option<Self> {
-        let path = Path::new(path);
-        if !path.exists() {
+        if !FileAccess::file_exists(path) {
             return None;
         }
 
-        let metadata = fs::metadata(path).ok()?;
-        let modified = metadata.modified().ok()?
-            .duration_since(SystemTime::UNIX_EPOCH).ok()?
-            .as_secs();
+        let file = FileAccess::open(path, ModeFlags::READ)?;
+        let size = file.get_length() as u64;
+        let modified = FileAccess::get_modified_time(path) as u64;
+        let filename = Path::new(path).file_name()?.to_string_lossy().to_string();
 
         Some(FileMetadata {
-            size: metadata.len(),
+            size,
             modified,
-            filename: path.file_name()?.to_string_lossy().to_string(),
+            filename,
         })
     }
 }
 
 pub fn load_metadata(metadata_path: &str) -> StoredMetadata {
-    if !Path::new(metadata_path).exists() {
+    if !FileAccess::file_exists(metadata_path) {
         return StoredMetadata::default();
     }
 
-    match fs::read_to_string(metadata_path) {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+    let file = match FileAccess::open(metadata_path, ModeFlags::READ) {
+        Some(f) => f,
+        None => return StoredMetadata::default(),
+    };
+
+    match serde_json::from_str(&file.get_as_text().to_string()) {
+        Ok(metadata) => metadata,
         Err(_) => StoredMetadata::default(),
     }
 }
 
 pub fn save_metadata(metadata_path: &str, metadata: &StoredMetadata) {
     if let Ok(json) = serde_json::to_string_pretty(metadata) {
-        let _ = fs::write(metadata_path, json);
+        if let Some(mut file) = FileAccess::open(metadata_path, ModeFlags::WRITE) {
+            file.store_string(json.as_str());
+        }
     }
 }
 
@@ -68,7 +73,7 @@ pub fn should_dump_model(
     };
 
     // Check if destination exists and metadata matches source
-    let should_dump = !Path::new(dest_path).exists() || 
+    let should_dump = !FileAccess::file_exists(dest_path) || 
         stored_metadata.dumped_models.get(model_key)
             .map(|stored| {
                 stored.size != source_metadata.size ||

@@ -5,7 +5,8 @@ mod metadata;
 mod sampler_config;
 mod sampler_resource;
 
-use godot::classes::{INode, ProjectSettings};
+use godot::classes::{INode, ProjectSettings, FileAccess};
+use godot::classes::file_access::ModeFlags;
 use godot::prelude::*;
 use godot::obj::Base;
 use llm::{run_completion_worker, run_embedding_worker};
@@ -85,21 +86,10 @@ impl NobodyWhoModel {
     /// Asynchronously loads a model from the source path to the destination path.
     /// Emits progress_changed signal with progress (0-100) and loading_completed when done.
     fn load_model_asynchronously(&mut self, source_path: GString, dest_path: GString) {
-        // Convert paths to absolute paths using ProjectSettings
-        let project_settings = ProjectSettings::singleton();
-        let source_path = project_settings.globalize_path(&source_path);
-        let dest_path = project_settings.globalize_path(&dest_path);
-        
         // Convert GString to String for Path operations
         let source_path_str: String = source_path.to_string();
         let dest_path_str: String = dest_path.to_string();
         
-        // Verify source file exists before starting
-        if !std::path::Path::new(&source_path_str).exists() {
-            godot_error!("Source file does not exist: {}", source_path_str);
-            return;
-        }
-
         // Create a unique key for this model based on its destination path
         let model_key = if let Some(filename) = std::path::Path::new(&dest_path_str).file_name() {
             filename.to_string_lossy().to_string()
@@ -107,14 +97,26 @@ impl NobodyWhoModel {
             "unknown_model".to_string()
         };
 
-        // Check if we need to dump the model based on metadata
+        // Check if source file exists using Godot's FileAccess
+        let source_exists = FileAccess::file_exists(&source_path);
+
+        if !source_exists {
+            godot_error!("Source file does not exist: {}", source_path_str);
+            return;
+        }
+
+        // Get project settings for metadata path
+        let project_settings = ProjectSettings::singleton();
         let metadata_path = project_settings.globalize_path("user://model_metadata.json").to_string();
+
+        // Check if we need to dump the model based on metadata
         if !metadata::should_dump_model(&source_path_str, &dest_path_str, &metadata_path, &model_key) {
             // Model is up to date, emit completion immediately
             self.base_mut().emit_signal("loading_completed", &[]);
             return;
         }
-        
+
+        // Create loader with paths
         let mut loader = llm::ModelLoader::new(source_path.to_string(), dest_path.to_string());
         let instance_id = self.base_mut().instance_id();
         
@@ -132,20 +134,16 @@ impl NobodyWhoModel {
                 
                 // Only emit if progress has changed
                 if progress != last_progress {
-                    unsafe {
-                        let mut obj = Gd::<NobodyWhoModel>::from_instance_id(instance_id);
-                        obj.emit_signal("progress_changed", &[Variant::from(progress)]);
-                    }
+                    let mut obj = Gd::<NobodyWhoModel>::from_instance_id(instance_id);
+                    obj.emit_signal("progress_changed", &[Variant::from(progress)]);
                     last_progress = progress;
                     stall_count = 0;
                 } else {
                     stall_count += 1;
                     // If progress hasn't changed for 50 checks (5 seconds), assume something went wrong
                     if stall_count > 50 {
-                        unsafe {
-                            let mut obj = Gd::<NobodyWhoModel>::from_instance_id(instance_id);
-                            obj.emit_signal("loading_completed", &[]);
-                        }
+                        let mut obj = Gd::<NobodyWhoModel>::from_instance_id(instance_id);
+                        obj.emit_signal("loading_completed", &[]);
                         return;
                     }
                 }
@@ -157,10 +155,8 @@ impl NobodyWhoModel {
             loader.wait_for_completion();
             
             // Emit completion signal
-            unsafe {
-                let mut obj = Gd::<NobodyWhoModel>::from_instance_id(instance_id);
-                obj.emit_signal("loading_completed", &[]);
-            }
+            let mut obj = Gd::<NobodyWhoModel>::from_instance_id(instance_id);
+            obj.emit_signal("loading_completed", &[]);
         });
     }
 }
