@@ -1,10 +1,13 @@
 [package]
 name = "nobodywho"
-version = "4.6.0"
+version = "4.5.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"] # Compile this crate to a dynamic C library.
+crate-type = ["staticlib"]
+
+[build-dependencies]
+cmake = "0.1"
 
 [dependencies]
 encoding_rs = "0.8.34"
@@ -23,7 +26,20 @@ llama-cpp-2 = { git = "https://github.com/utilityai/llama-cpp-rs.git", rev = "5f
 lazy_static = "1.5.0"
 minijinja-contrib = { version = "2.7.0", features = ["pycompat"] }
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+[target.'cfg(target_os = "ios")'.dependencies]
+llama-cpp-2 = { git = "https://github.com/utilityai/llama-cpp-rs.git", rev = "5f49768", features = ["metal"] }
+
+[target.'cfg(all(not(target_os = "macos"), not(target_os = "ios")))'.dependencies]
 llama-cpp-2 = { git = "https://github.com/utilityai/llama-cpp-rs.git", rev = "5f49768", features = ["vulkan"] }
 
- 
+[target.aarch64-apple-ios]
+rustflags = [
+    "-C", "link-arg=-mios-version-min=14.0",
+    "-C", "link-arg=-target", "-C", "link-arg=arm64-apple-ios",
+    "-C", "link-arg=-fapple-link-rtlib",
+    "-C", "link-arg=-L/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/16/lib/darwin/ios",
+    "-C", "link-arg=-lclang_rt.ios",
+    "-C", "link-arg=-framework", "-C", "link-arg=Metal",
+    "-C", "link-arg=-framework", "-C", "link-arg=MetalKit",
+    "-C", "link-arg=-framework", "-C", "link-arg=Foundation"
+]
