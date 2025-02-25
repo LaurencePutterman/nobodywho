@@ -6,7 +6,6 @@ mod sampler_config;
 mod sampler_resource;
 
 use godot::classes::{INode, ProjectSettings, FileAccess};
-use godot::classes::file_access::ModeFlags;
 use godot::prelude::*;
 use godot::obj::Base;
 use llm::{run_completion_worker, run_embedding_worker};
@@ -54,7 +53,7 @@ impl INode for NobodyWhoModel {
 #[godot_api]
 impl NobodyWhoModel {
     // memoized model loader
-    fn get_model(&mut self) -> Result<llm::Model, llm::LoadModelError> {
+    fn load_model(&mut self) -> Result<llm::Model, llm::LoadModelError> {
         if let Some(model) = &self.model {
             return Ok(model.clone());
         }
@@ -77,10 +76,10 @@ impl NobodyWhoModel {
     }
 
     #[signal]
-    fn progress_changed(progress: f32) {}
+    fn progress_changed(progress: f32);
 
     #[signal]
-    fn loading_completed() {}
+    fn loading_completed();
 
     #[func]
     /// Asynchronously loads a model from the source path to the destination path.
@@ -268,9 +267,7 @@ impl NobodyWhoChat {
     fn get_model(&mut self) -> Result<llm::Model, String> {
         let gd_model_node = self.model_node.as_mut().ok_or("Model node was not set")?;
         let mut nobody_model = gd_model_node.bind_mut();
-        let model: llm::Model = nobody_model.get_model().map_err(|e| e.to_string())?;
-
-        Ok(model)
+        nobody_model.load_model().map_err(|e| e.to_string())
     }
 
     fn get_sampler_config(&mut self) -> sampler_config::SamplerConfig {
@@ -447,9 +444,7 @@ impl NobodyWhoEmbedding {
     fn get_model(&mut self) -> Result<llm::Model, String> {
         let gd_model_node = self.model_node.as_mut().ok_or("Model node was not set")?;
         let mut nobody_model = gd_model_node.bind_mut();
-        let model: llm::Model = nobody_model.get_model().map_err(|e| e.to_string())?;
-
-        Ok(model)
+        nobody_model.load_model().map_err(|e| e.to_string())
     }
 
     #[func]
