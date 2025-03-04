@@ -4,9 +4,9 @@ use std::env;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GPUType {
     Unknown,
-    MetalHighPerformance,  // A14 and newer (iPhone 12 and newer)
-    MetalIntegrated,       // A12-A13 (iPhone XS/XR to iPhone 11)
-    MetalLowPower,         // A11 and older (iPhone X and older)
+    MetalHighPerformance,  // Dedicated GPUs and newer Apple Silicon
+    MetalIntegrated,       // Integrated GPUs and mid-range Apple Silicon
+    MetalLowPower,         // Older integrated GPUs
     Other,
 }
 
@@ -36,7 +36,7 @@ pub fn detect_metal_capabilities() -> GPUCapabilities {
     let os = Os::singleton();
     let model_name = os.get_model_name().to_string();
     
-    // Determine GPU type based on device model
+    #[cfg(target_os = "ios")]
     let gpu_type = match model_name.as_str() {
         // High-end devices (A14 and newer)
         m if m.contains("iPhone15,") || m.contains("iPhone14,") || m.contains("iPhone13,") => GPUType::MetalHighPerformance,
@@ -48,40 +48,34 @@ pub fn detect_metal_capabilities() -> GPUCapabilities {
         
         // Low-power devices (A11 and older)
         m if m.contains("iPhone10,") || m.contains("iPhone9,") => GPUType::MetalLowPower,
-        
-        // Unknown or other devices
         _ => GPUType::Unknown,
     };
-    
-    // Determine capabilities based on GPU type
-    let supports_fp16 = match gpu_type {
-        GPUType::MetalHighPerformance => true,
-        GPUType::MetalIntegrated => true,
-        GPUType::MetalLowPower => false,
-        _ => false,
+
+    #[cfg(target_os = "macos")]
+    let gpu_type = {
+        // For macOS, we'll detect based on the model name and system info
+        if model_name.contains("MacBook") {
+            if model_name.contains("Pro") {
+                if model_name.contains("M1") || model_name.contains("M2") || model_name.contains("M3") {
+                    GPUType::MetalHighPerformance
+                } else {
+                    GPUType::MetalIntegrated
+                }
+            } else {
+                GPUType::MetalLowPower
+            }
+        } else if model_name.contains("iMac") || model_name.contains("Mac Pro") || model_name.contains("Mac Studio") {
+            GPUType::MetalHighPerformance
+        } else {
+            GPUType::MetalIntegrated
+        }
     };
-    
-    let supports_simd_group = match gpu_type {
-        GPUType::MetalHighPerformance => true,
-        _ => false,
-    };
-    
-    let max_threads_per_group = match gpu_type {
-        GPUType::MetalHighPerformance => 1024,
-        GPUType::MetalIntegrated => 512,
-        GPUType::MetalLowPower => 256,
-        _ => 512,
-    };
-    
-    godot_print!("[Metal] Detected GPU type: {:?}", gpu_type);
-    godot_print!("[Metal] FP16 support: {}", supports_fp16);
-    godot_print!("[Metal] SIMD group support: {}", supports_simd_group);
-    
+
     GPUCapabilities {
         gpu_type,
-        supports_fp16,
-        supports_simd_group,
-        max_threads_per_group,
+        supports_fp16: true, // Most modern Metal devices support fp16
+        supports_simd_group: true,
+        max_threads_per_group: 512,
     }
 }
 

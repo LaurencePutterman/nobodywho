@@ -7,7 +7,7 @@ mod sampler_resource;
 
 #[cfg(target_os = "ios")]
 mod ios_optimizations;
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 mod metal_shaders;
 
 use godot::classes::{INode, ProjectSettings, FileAccess};
@@ -57,6 +57,9 @@ impl INode for NobodyWhoModel {
 
 #[godot_api]
 impl NobodyWhoModel {
+    #[signal]
+    fn model_ready();
+
     // memoized model loader
     fn load_model(&mut self) -> Result<llm::Model, llm::LoadModelError> {
         if let Some(model) = &self.model {
@@ -220,6 +223,8 @@ struct NobodyWhoChat {
 
     prompt_tx: Option<Sender<String>>,
     completion_rx: Option<Receiver<llm::LLMOutput>>,
+    ready_tx: Option<Sender<()>>,
+    ready_rx: Option<Receiver<()>>,
 
     base: Base<Node>,
 }
@@ -235,6 +240,8 @@ impl INode for NobodyWhoChat {
             context_length: 4096,
             prompt_tx: None,
             completion_rx: None,
+            ready_tx: None,
+            ready_rx: None,
             base,
         }
     }
@@ -247,6 +254,17 @@ impl INode for NobodyWhoChat {
     }
 
     fn physics_process(&mut self, _delta: f64) {
+        // Check for model ready signal
+        if let Some(rx) = &self.ready_rx {
+            if rx.try_recv().is_ok() {
+                if let Some(model_node) = self.model_node.as_mut() {
+                    model_node.bind_mut().base_mut().emit_signal("model_ready", &[]);
+                }
+                self.ready_rx = None; // Clear the receiver after use
+            }
+        }
+
+        // Check for completion messages
         while let Some(rx) = self.completion_rx.as_ref() {
             match rx.try_recv() {
                 Ok(llm::LLMOutput::Token(token)) => {
@@ -265,8 +283,6 @@ impl INode for NobodyWhoChat {
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     godot_error!("Model output channel died. Did the LLM worker crash?");
-                    // set hanging channel to None
-                    // this prevents repeating the dead channel error message foreve
                     self.completion_rx = None;
                 }
             }
@@ -317,13 +333,17 @@ impl NobodyWhoChat {
             // make and store channels for communicating with the llm worker thread
             let (prompt_tx, prompt_rx) = std::sync::mpsc::channel();
             let (completion_tx, completion_rx) = std::sync::mpsc::channel();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            
             self.prompt_tx = Some(prompt_tx);
             self.completion_rx = Some(completion_rx);
+            self.ready_rx = Some(ready_rx);
 
             // start the llm worker
             let n_ctx = self.context_length;
             let system_prompt = self.system_prompt.to_string();
             let stop_tokens: Vec<String> = self.stop_tokens.to_vec().into_iter().map(|g| g.to_string()).collect();
+            
             std::thread::spawn(move || {
                 run_completion_worker(
                     model,
@@ -333,6 +353,7 @@ impl NobodyWhoChat {
                     n_ctx,
                     system_prompt,
                     stop_tokens,
+                    ready_tx,
                 );
             });
 

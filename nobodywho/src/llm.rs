@@ -1,8 +1,8 @@
 use crate::chat_state;
 pub use crate::sampler_config::{make_sampler, SamplerConfig};
 
-#[cfg(target_os = "ios")]
-use crate::metal_shaders::{GPUType, GPUCapabilities, detect_metal_capabilities, configure_metal_parameters};
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+use crate::metal_shaders::{GPUType, detect_metal_capabilities};
 
 use lazy_static::lazy_static;
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -132,7 +132,7 @@ impl PerformanceMetrics {
         }
         
         godot_print!(
-            "[LLM Performance] Tokens/sec: {:.2} | Context size: {}/{} | GPU layers: {}",
+            "[LLM Performance] Tokens/sec: {:.2} | Tokens in context: {} | Batch size: {} | GPU layers: {}",
             self.tokens_per_second,
             self.current_context_size,
             self.current_batch_size,
@@ -176,48 +176,19 @@ impl PerformanceMetrics {
     }
 }
 
-// Directory to store Metal shader cache for iOS
-#[cfg(target_os = "ios")]
-const METAL_SHADER_CACHE_DIR: &str = "user://metal_shader_cache";
-
 lazy_static! {
     static ref GLOBAL_INFERENCE_LOCK: Mutex<()> = Mutex::new(());
 }
 
-#[cfg(target_os = "ios")]
-fn initialize_metal_cache() -> bool {
-    use godot::classes::DirAccess;
-    
-    // Ensure shader cache directory exists
-    if !DirAccess::dir_exists_absolute(METAL_SHADER_CACHE_DIR) {
-        let result = DirAccess::make_dir_recursive_absolute(METAL_SHADER_CACHE_DIR);
-        if result != Error::OK {
-            godot_error!("Failed to create Metal shader cache directory: {:?}", result);
-            return false;
-        }
-    }
-    
-    // Set environment variable for llama.cpp/ggml to use our cache dir
-    // This assumes llama.cpp checks this environment variable for Metal shader cache location
-    let user_path = godot::classes::Os::singleton().get_user_data_dir();
-    let full_cache_path = format!("{}/{}", user_path, METAL_SHADER_CACHE_DIR);
-    std::env::set_var("GGML_METAL_CACHE_DIR", &full_cache_path);
-    godot_print!("Set Metal shader cache directory to: {}", full_cache_path);
-    true
-}
-
 static LLAMA_BACKEND: LazyLock<LlamaBackend> =
     LazyLock::new(|| {
-        #[cfg(target_os = "ios")]
+        #[cfg(any(target_os = "ios", target_os = "macos"))]
         {
-            // Initialize Metal caching
-            let _ = initialize_metal_cache();
+            // Initialize Metal optimizations through metal_shaders module
+            crate::metal_shaders::configure_metal_parameters();
             
             // Set Metal-specific options
             std::env::set_var("GGML_METAL_NDEBUG", "1"); // Disable Metal debugging for performance
-            
-            // We could potentially use more environment variables here
-            // These would depend on what llama.cpp/ggml supports
         }
         
         LlamaBackend::init().expect("Failed to initialize llama backend")
@@ -638,6 +609,7 @@ pub fn run_completion_worker(
     n_ctx: u32,
     system_prompt: String,
     stop_tokens: Vec<String>,
+    ready_tx: Sender<()>,
 ) {
     if let Err(msg) = run_completion_worker_result(
         model,
@@ -647,6 +619,7 @@ pub fn run_completion_worker(
         n_ctx,
         system_prompt,
         stop_tokens,
+        ready_tx,
     ) {
         // Forward fatal errors to the consumer
         completion_tx
@@ -676,6 +649,7 @@ fn run_completion_worker_result(
     n_ctx: u32,
     system_prompt: String,
     stop_tokens: Vec<String>,
+    ready_tx: Sender<()>,
 ) -> Result<(), WorkerError> {
     // Initialize performance metrics
     let mut metrics = PerformanceMetrics::new();
@@ -684,6 +658,8 @@ fn run_completion_worker_result(
     
     // Set up context parameters using available parallelism
     let n_threads = std::thread::available_parallelism()?.get() as i32;
+    
+    // Ensure context size doesn't exceed model's training context size
     let n_ctx = std::cmp::min(n_ctx, model.n_ctx_train());
     metrics.update_context_size(n_ctx as usize);
     
@@ -711,6 +687,8 @@ fn run_completion_worker_result(
         // On Metal devices, we can optimize batch processing
         if matches!(caps.gpu_type, GPUType::MetalHighPerformance | GPUType::MetalIntegrated | GPUType::MetalLowPower) {
             // Set optimal batch size based on device capability
+            // Note: This is the batch size (number of tokens processed at once), not the context size (maximum tokens in context window)
+            // The context size (n_ctx) is still determined by the value passed from Godot
             let batch_size = match caps.gpu_type {
                 GPUType::MetalHighPerformance => 1024,
                 GPUType::MetalIntegrated => 512,
@@ -750,6 +728,8 @@ fn run_completion_worker_result(
     #[cfg(target_os = "ios")]
     let _batch_capacity = {
         let caps = detect_metal_capabilities();
+        // Note: This is the batch capacity (number of tokens processed at once), not the context size (maximum tokens in context window)
+        // The context size (n_ctx) is still determined by the value passed from Godot
         let size = match caps.gpu_type {
             GPUType::MetalHighPerformance => 1024,
             GPUType::MetalIntegrated => 512,
@@ -792,6 +772,9 @@ fn run_completion_worker_result(
     let mut last_n_tokens: VecDeque<String> = VecDeque::with_capacity(longest_stop_token);
 
     godot_print!("[LLM Perf] Ready to process messages with {} stop tokens", stop_tokens.len());
+
+    // Signal that the model is ready
+    let _ = ready_tx.send(());
 
     // Main message processing loop
     while let Ok(content) = message_rx.recv() {
@@ -1396,6 +1379,7 @@ pub enum PerformanceProfile {
     Minimum,    // Minimum viable performance
 }
 
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
     device_model: String,
@@ -1403,7 +1387,7 @@ pub struct DeviceInfo {
     gpu_type: GPUType,
 }
 
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 impl Default for DeviceInfo {
     fn default() -> Self {
         Self {
@@ -1414,7 +1398,7 @@ impl Default for DeviceInfo {
     }
 }
 
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 pub fn get_device_info() -> DeviceInfo {
     use godot::classes::Os;
     
@@ -1424,8 +1408,13 @@ pub fn get_device_info() -> DeviceInfo {
     // Get memory info - this is an approximation as Godot doesn't expose exact memory
     let memory_mb = os.get_static_memory_usage() / (1024 * 1024);
     
-    // Get GPU capabilities
+    // Detect GPU capabilities
     let caps = detect_metal_capabilities();
+    
+    #[cfg(target_os = "ios")]
+    godot_print!("[LLM iOS] Detected device: {}, Memory: {}MB", model_name, memory_mb);
+    #[cfg(target_os = "macos")]
+    godot_print!("[LLM macOS] Detected device: {}, Memory: {}MB", model_name, memory_mb);
     
     DeviceInfo {
         device_model: model_name,
@@ -1504,6 +1493,7 @@ mod tests {
                 4096,
                 system_prompt,
                 vec![],
+                std::sync::mpsc::channel().0,
             )
         });
 
@@ -1625,6 +1615,7 @@ mod tests {
                 4096,
                 trivia_bot_system_prompt,
                 vec![],
+                std::sync::mpsc::channel().0,
             )
         });
 
@@ -1641,6 +1632,7 @@ mod tests {
                 4096,
                 trivia_bot_system_prompt,
                 vec![],
+                std::sync::mpsc::channel().0,
             )
         });
 
@@ -1704,6 +1696,7 @@ mod tests {
                 100, // very low context size. will be exceeded immediately
                 system_prompt,
                 vec![],
+                std::sync::mpsc::channel().0,
             )
         });
 
@@ -1751,6 +1744,7 @@ mod tests {
                 4096,
                 system_prompt,
                 vec!["horse".to_string()], // Stop at "horse"
+                std::sync::mpsc::channel().0,
             )
         });
 
