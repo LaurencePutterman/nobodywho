@@ -5,6 +5,11 @@ mod metadata;
 mod sampler_config;
 mod sampler_resource;
 
+#[cfg(target_os = "ios")]
+mod ios_optimizations;
+#[cfg(target_os = "ios")]
+mod metal_shaders;
+
 use godot::classes::{INode, ProjectSettings, FileAccess};
 use godot::prelude::*;
 use godot::obj::Base;
@@ -234,6 +239,13 @@ impl INode for NobodyWhoChat {
         }
     }
 
+    #[cfg(target_os = "ios")]
+    fn ready(&mut self) {
+        // Initialize Metal optimizations for iOS
+        metal_shaders::configure_metal_parameters();
+        godot_print!("Initialized iOS Metal optimizations");
+    }
+
     fn physics_process(&mut self, _delta: f64) {
         while let Some(rx) = self.completion_rx.as_ref() {
             match rx.try_recv() {
@@ -275,6 +287,21 @@ impl NobodyWhoChat {
             let nobody_sampler: GdRef<NobodyWhoSampler> = gd_sampler.bind();
             nobody_sampler.sampler_config.clone()
         } else {
+            #[cfg(target_os = "ios")]
+            {
+                // On iOS, use the thermal controller to determine performance profile
+                if let Ok(thermal_state) = llm::get_thermal_state() {
+                    let profile = match thermal_state {
+                        0 => "balanced", // Normal
+                        1 => "balanced", // Fair
+                        2 => "speed",    // Serious
+                        3 => "speed",    // Critical
+                        _ => "balanced", // Unknown
+                    };
+                    return ios_optimizations::get_optimized_sampler_config(profile);
+                }
+            }
+            
             sampler_config::SamplerConfig::default()
         }
     }
